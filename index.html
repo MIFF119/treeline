@@ -22,10 +22,10 @@ button:hover{background:#e8e1cc;color:#000}
 <canvas id="c"></canvas>
 <div id="start"><div class="box">
   <h1>THE TREELINE</h1>
-  <p class="sub">ATMOSPHERE TEST &middot; STAGE 1 OF 4 &middot; NO SOUND YET</p>
+  <p class="sub">ATMOSPHERE TEST &middot; STAGE 2 OF 4 &middot; HEADPHONES ON</p>
   <button id="go">WALK IN</button>
   <button id="vr" style="display:none">ENTER VR</button>
-  <p class="hint">desktop: click to look &middot; WASD walk &middot; 1 PS1 &middot; 2 PS2 &middot; 3 1-BIT &middot; F fps &middot; hold Shift = debug fast-walk<br>
+  <p class="hint">desktop: click to look &middot; WASD walk &middot; 1 PS1 &middot; 2 PS2 &middot; 3 1-BIT &middot; F fps &middot; M mute &middot; H test the silence &middot; hold Shift = debug fast-walk<br>
   Oculus Go: hold trigger or touchpad to walk where you look &middot; double-tap = next style &middot; look at your feet + double-tap = fps</p>
 </div></div>
 <div id="fps">-- fps</div>
@@ -138,6 +138,33 @@ var CONFIG = {
     clearance: 0.75,     // how far trees keep back from the path edge
     wander: [6, 3, 1.5], // how much it winds (three layered curves)
     fade: 0.7            // how faint it gets in the "where did the path go" stretches
+  },
+  sound: {
+    master: 1.2,         // overall volume. The mix is quiet on purpose: rare sounds (stage 3+) will cut through it.
+    hrtf: true,          // 3D "inside your head" positioning. false = cheaper basic left/right panning if the Go struggles.
+    wind: {
+      volume: 0.5,       // the low whoosh
+      rustle: 0.28,      // leaves hissing in the canopy, only really comes in during strong gusts
+      sources: 4,        // wind "speakers" placed around you up in the treetops. Gusts roll from one to the next.
+      distance: 10,      // how far away they sit (metres)
+      height: 9          // how high up (it's the canopy moving, not the ground)
+    },
+    drone: {
+      start: 0.0,        // drone volume when you first walk in
+      max: 0.5,          // where it ends up after a long walk
+      rampSeconds: 240,  // seconds of walking to get ~63% of the way there
+      recover: 0.3,      // standing still unwinds it at 30% of the speed walking winds it up
+      freq: 36           // Hz. Sub-bass: felt more than heard (phone/Go speakers mostly hear the harmonics)
+    },
+    steps: {
+      volume: 0.85,
+      twigVolume: 1.0,
+      twigRadius: 0.45,  // step within this many metres of a stick on the ground = SNAP
+      hiddenTwigChance: 0.05  // and sometimes there's one hiding under the leaves
+    },
+    crickets: { count: 5, volume: 0.35, minDist: 5, maxDist: 16 },
+    owls: { volume: 0.5, minGap: 25, maxGap: 70, minDist: 16, maxDist: 32 },
+    hush: { fadeOut: 0.3, fadeIn: 6 }   // the forest going silent: how fast it stops, how slowly it creeps back
   },
   debug: { showFps: true }
 };
@@ -737,8 +764,8 @@ function collide() {
   }
 }
 
-// hook for stage 2 (footstep sounds). Fires once per stride.
-function onFootstep() {}
+// fires once per stride -> footstep sound (see SOUND below)
+function onFootstep() { playFootstep(1); }
 
 var vrTap = { was: false, pressT: 0, lastTap: -9 };
 function vrHeld(now) {
@@ -779,7 +806,11 @@ function updateWalk(dt, now, vr) {
   } else {
     player.yaw += dt * 0.03;                           // slow creepy pan behind the title screen
   }
+  if (want && player.speed < 0.05) player.stepDist = Wk.stride * 0.6;   // first step lands quickly when you set off
   player.speed += (want * Wk.speed * run - player.speed) * Math.min(1, dt * Wk.accel);
+  // the little scuff your feet make as you come to a stop (stage 3's follower copies this...)
+  if (!want && player.walking && player.speed < 0.35) { player.walking = false; playFootstep(0.45); }
+  if (want && player.speed > 0.5) player.walking = true;
   if (player.speed < 0.001) player.speed = 0;
   player.x += player.dx * player.speed * dt;
   player.z += player.dz * player.speed * dt;
@@ -918,7 +949,7 @@ function drawFps(txt) {
    INPUT + START SCREEN + VR
    ============================================================ */
 var startEl = document.getElementById('start'), lockEl = document.getElementById('lock');
-function begin() { started = true; startEl.style.display = 'none'; fpsEl.style.display = showFps ? 'block' : 'none'; }
+function begin() { initAudio(); started = true; startEl.style.display = 'none'; fpsEl.style.display = showFps ? 'block' : 'none'; }
 document.getElementById('go').onclick = function () { begin(); if (canvas.requestPointerLock) canvas.requestPointerLock(); };
 canvas.addEventListener('click', function () { if (started && !renderer.xr.isPresenting && canvas.requestPointerLock) canvas.requestPointerLock(); });
 document.addEventListener('pointerlockchange', function () { lockEl.style.display = (started && document.pointerLockElement !== canvas && !renderer.xr.isPresenting) ? 'block' : 'none'; });
@@ -933,6 +964,8 @@ window.addEventListener('keydown', function (e) {
   if (e.code === 'Digit1') applyStyle('ps1');
   if (e.code === 'Digit2') applyStyle('ps2');
   if (e.code === 'Digit3') applyStyle('onebit');
+  if (e.code === 'KeyH') hush(15);
+  if (e.code === 'KeyM' && A.ctx) A.master.gain.value = A.master.gain.value > 0 ? 0 : CONFIG.sound.master;
 });
 window.addEventListener('keyup', function (e) { keys[e.code] = false; });
 window.addEventListener('blur', function () { keys = {}; });
@@ -943,6 +976,7 @@ if (navigator.xr && navigator.xr.isSessionSupported) {
 }
 vrBtn.onclick = function () {
   if (session) { session.end(); return; }
+  initAudio();   // audio has to be started inside a click, so it happens right here
   navigator.xr.requestSession('immersive-vr').then(function (s) {
     session = s;
     if (document.exitPointerLock) document.exitPointerLock();
@@ -965,6 +999,274 @@ vrBtn.onclick = function () {
 };
 
 /* ============================================================
+   SOUND  (stage 2)
+   Everything is synthesized live with Web Audio: no sound files at all.
+   Your ears (the "listener") get glued to the camera every frame, and every sound
+   goes through a PannerNode set to HRTF. HRTF filters a sound the way your head and
+   outer ear would, so it sounds ABOVE / BEHIND / BELOW you, not just louder in one ear.
+
+   Signal flow:
+     sources -> [bus: wind | drone | life | steps | sfx] -> master -> compressor -> speakers
+   A "bus" is just a volume knob a group of sounds shares. The life bus (crickets + owls)
+   is the one hush() slams shut when the forest goes silent.
+   ============================================================ */
+var SN = CONFIG.sound;
+var A = { ctx: null, on: false, hushUntil: -1, windScale: 1, droneTime: 0, tick: 0, nextOwl: 0, crickets: [], wind: [], footSide: 1 };
+
+function initAudio() {
+  if (A.ctx) { if (A.ctx.state === 'suspended') A.ctx.resume(); return; }
+  var AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  var ctx = A.ctx = new AC();
+  A.master = ctx.createGain(); A.master.gain.value = SN.master;
+  // the compressor squashes any sudden peaks so nothing ever clips/distorts
+  var comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -20; comp.knee.value = 12; comp.ratio.value = 4; comp.attack.value = 0.003; comp.release.value = 0.3;
+  A.master.connect(comp); comp.connect(ctx.destination);
+  function bus(v) { var g = ctx.createGain(); g.gain.value = v; g.connect(A.master); return g; }
+  A.windBus = bus(1); A.droneBus = bus(1); A.lifeBus = bus(1); A.stepBus = bus(SN.steps.volume); A.sfxBus = bus(1);
+  A.white = makeNoise(ctx, 3, false); A.brown = makeNoise(ctx, 3, true);
+  buildWind(); buildDrone(); buildCrickets();
+  A.nextOwl = ctx.currentTime + mr(10, 25);
+  A.on = true;
+  if (ctx.state === 'suspended') ctx.resume();
+}
+document.addEventListener('visibilitychange', function () { if (!A.ctx) return; if (document.hidden) A.ctx.suspend(); else A.ctx.resume(); });
+
+// 3 seconds of noise, made once and reused by everything. White = hiss. Brown = deep rumble
+// (each sample is the last one plus a little random step, so it wanders slowly = mostly bass).
+function makeNoise(ctx, seconds, brown) {
+  var n = Math.floor(ctx.sampleRate * seconds), b = ctx.createBuffer(1, n, ctx.sampleRate), d = b.getChannelData(0), last = 0;
+  for (var i = 0; i < n; i++) {
+    var w = Math.random() * 2 - 1;
+    if (brown) { last = (last + 0.02 * w) / 1.02; d[i] = last * 3.5; } else d[i] = w;
+  }
+  return b;
+}
+function makePanner(x, y, z, ref) {
+  var p = A.ctx.createPanner();
+  p.panningModel = SN.hrtf ? 'HRTF' : 'equalpower';
+  p.distanceModel = 'inverse'; p.refDistance = ref || 1.5; p.rolloffFactor = 1; p.maxDistance = 100;
+  setPos(p, x, y, z); return p;
+}
+function setPos(p, x, y, z) {   // new browsers use AudioParams, old ones setPosition()
+  if (p.positionX) { p.positionX.value = x; p.positionY.value = y; p.positionZ.value = z; } else p.setPosition(x, y, z);
+}
+function noiseSrc(buf, t, dur) {   // a one-shot slice of noise from a random spot in the buffer
+  var s = A.ctx.createBufferSource(); s.buffer = buf; s.start(t, Math.random() * (buf.duration - 0.5), dur); return s;
+}
+function filt(type, f, q) { var b = A.ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; if (q) b.Q.value = q; return b; }
+function gainNode(v) { var g = A.ctx.createGain(); g.gain.value = v; return g; }
+function chain() { for (var i = 0; i < arguments.length - 1; i++) arguments[i].connect(arguments[i + 1]); return arguments[arguments.length - 1]; }
+
+// ---------- your ears = the camera
+function updateListener() {
+  var L = A.ctx.listener, e = cam.matrixWorld.elements;
+  var px = e[12], py = e[13], pz = e[14], fx = -e[8], fy = -e[9], fz = -e[10], ux = e[4], uy = e[5], uz = e[6];
+  if (L.forwardX) {
+    L.positionX.value = px; L.positionY.value = py; L.positionZ.value = pz;
+    L.forwardX.value = fx; L.forwardY.value = fy; L.forwardZ.value = fz; L.upX.value = ux; L.upY.value = uy; L.upZ.value = uz;
+  } else { L.setPosition(px, py, pz); L.setOrientation(fx, fy, fz, ux, uy, uz); }
+}
+
+/* ---------- WIND
+   A few looping noise "speakers" up in the treetops around you. Each one splits the noise into
+   a low whoosh (bandpass ~400Hz) and a high leafy hiss (~3.8kHz). gust() is a slow wobbly 0..1
+   value; each speaker reads it a few seconds late, so a gust rolls around you from one side to the other. */
+function buildWind() {
+  for (var i = 0; i < SN.wind.sources; i++) {
+    var src = A.ctx.createBufferSource(); src.buffer = A.white; src.loop = true;
+    var lo = filt('bandpass', 400, 0.6), loCut = filt('lowpass', 900), loG = gainNode(0), hi = filt('bandpass', 3800, 0.8), hiG = gainNode(0);
+    var pan = makePanner(0, 0, 0, 4);
+    chain(src, lo, loCut, loG, pan); chain(src, hi, hiG, pan); pan.connect(A.windBus);   // loCut keeps hiss out of the whoosh
+    src.start(0, Math.random() * 2.5);
+    A.wind.push({ ang: i / SN.wind.sources * TAU + 0.4, lo: lo, loG: loG, hi: hi, hiG: hiG, pan: pan, lag: i * 2.3 + Math.random() * 3 });
+  }
+}
+function gust(t) {
+  return clamp(0.5 + 0.25 * Math.sin(t * 0.11) + 0.15 * Math.sin(t * 0.29 + 1.3) + 0.1 * Math.sin(t * 0.71 + 2.1), 0, 1);
+}
+function tickWind(t) {
+  var WS = SN.wind;
+  for (var i = 0; i < A.wind.length; i++) {
+    var w = A.wind[i], g = gust(t - w.lag);
+    w.loG.gain.setTargetAtTime(WS.volume * A.windScale * (0.15 + 0.85 * g), t, 0.4);
+    w.lo.frequency.setTargetAtTime(220 + 520 * g, t, 0.4);                 // stronger gust = higher whoosh
+    w.hiG.gain.setTargetAtTime(WS.rustle * A.windScale * g * g * g, t, 0.3); // leaves only really go in big gusts
+    setPos(w.pan, player.x + Math.cos(w.ang) * WS.distance, player.y + WS.height, player.z + Math.sin(w.ang) * WS.distance);
+  }
+}
+
+/* ---------- DRONE
+   Two sine waves at almost the same pitch (36Hz and 36.5Hz). Played together they "beat":
+   the volume slowly pulses at the difference (~0.5Hz), like something breathing very slowly.
+   Plus quiet harmonics (so small speakers hear SOMETHING) and a brown-noise rumble.
+   It sits 20m under your feet. You can't really locate sub-bass, so it just feels like it's everywhere. */
+function buildDrone() {
+  var ctx = A.ctx, f = SN.drone.freq, mix = gainNode(1);
+  function osc(type, freq, g) { var o = ctx.createOscillator(); o.type = type; o.frequency.value = freq; chain(o, gainNode(g), mix); o.start(); }
+  osc('sine', f, 0.5); osc('sine', f * 1.014, 0.45);
+  osc('sine', f * 2.005, 0.2); osc('triangle', f * 3.01, 0.06);
+  var rumble = ctx.createBufferSource(); rumble.buffer = A.brown; rumble.loop = true;
+  chain(rumble, filt('lowpass', 90), gainNode(0.5), mix); rumble.start();
+  A.droneG = gainNode(0);
+  A.dronePan = makePanner(0, -20, 0, 20); A.dronePan.rolloffFactor = 0;   // rolloff 0 = no fading with distance
+  chain(mix, filt('lowpass', 170), A.droneG, A.dronePan, A.droneBus);
+}
+function tickDrone(t) {
+  var D = SN.drone, level = D.start + (D.max - D.start) * (1 - Math.exp(-A.droneTime / D.rampSeconds));
+  A.droneG.gain.setTargetAtTime(level * (0.85 + 0.15 * Math.sin(t * 0.05)), t, 1.5);
+  setPos(A.dronePan, player.x, player.y - 20, player.z);
+}
+
+/* ---------- CRICKETS
+   Each cricket is one high sine wave (~4-5kHz) that we switch on and off super fast:
+   3-5 pulses of 12ms = one "chirp". We schedule chirps a little ahead of time on the audio
+   clock (way more precise than doing it from the frame loop). Walk away from one and it
+   respawns somewhere else around you. */
+function buildCrickets() {
+  for (var i = 0; i < SN.crickets.count; i++) {
+    var o = A.ctx.createOscillator(); o.frequency.value = mr(4200, 5200);
+    var g = gainNode(0), pan = makePanner(0, 0, 0, 1.5);
+    chain(o, g, pan, A.lifeBus); o.start();
+    var c = { g: g, pan: pan, x: 0, y: 0, z: 0, next: A.ctx.currentTime + mr(0.5, 4), pulses: 3 + Math.floor(Math.random() * 3), rate: mr(0.028, 0.04) };
+    placeCricket(c); A.crickets.push(c);
+  }
+}
+function placeCricket(c) {
+  var a = mr(0, TAU), d = mr(SN.crickets.minDist, SN.crickets.maxDist);
+  c.x = player.x + Math.cos(a) * d; c.z = player.z + Math.sin(a) * d; c.y = groundH(c.x, c.z) + 0.1;
+  setPos(c.pan, c.x, c.y, c.z);
+}
+function tickCrickets(t) {
+  for (var i = 0; i < A.crickets.length; i++) {
+    var c = A.crickets[i], dx = c.x - player.x, dz = c.z - player.z;
+    if (dx * dx + dz * dz > Math.pow(SN.crickets.maxDist + 8, 2)) placeCricket(c);
+    if (t < A.hushUntil) continue;                     // silenced: they wait
+    if (c.next < t) c.next = t + 0.05;
+    while (c.next < t + 0.3) {
+      var g = c.g.gain, amp = SN.crickets.volume;
+      for (var j = 0; j < c.pulses; j++) {
+        var s = c.next + j * c.rate;
+        g.setValueAtTime(0, s); g.linearRampToValueAtTime(amp, s + 0.004); g.linearRampToValueAtTime(0, s + 0.016);
+      }
+      c.next += Math.random() < 0.12 ? mr(2, 6) : mr(0.4, 0.9);   // mostly steady, sometimes a pause
+    }
+  }
+}
+
+/* ---------- OWLS
+   "hoo... hoo-hoo hoooo". Each hoot is a sine around 360Hz that sags slightly in pitch, with
+   a 5Hz vibrato (a little oscillator wobbling the main one's frequency) and some breathy
+   filtered noise on top. Far-away owls get a lowpass filter: air soaks up high frequencies. */
+function hoot(t, dur, f, out) {
+  var ctx = A.ctx, o = ctx.createOscillator();
+  o.frequency.setValueAtTime(f * 1.04, t); o.frequency.exponentialRampToValueAtTime(f * 0.94, t + dur);
+  var vib = ctx.createOscillator(); vib.frequency.value = 5.5; chain(vib, gainNode(f * 0.012), o.frequency);
+  var g = gainNode(0);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + 0.06); g.gain.setValueAtTime(1, t + dur - 0.1); g.gain.linearRampToValueAtTime(0, t + dur + 0.05);
+  chain(o, g, out);
+  var n = noiseSrc(A.white, t, dur + 0.1), ng = gainNode(0);
+  ng.gain.setValueAtTime(0, t); ng.gain.linearRampToValueAtTime(0.5, t + 0.08); ng.gain.linearRampToValueAtTime(0, t + dur + 0.05);
+  chain(n, filt('bandpass', f, 4), ng, out);
+  o.start(t); o.stop(t + dur + 0.1); vib.start(t); vib.stop(t + dur + 0.1);
+}
+function playOwl(x, y, z) {
+  if (!A.on) return;
+  var t = A.ctx.currentTime + 0.05, d = Math.sqrt((x - player.x) * (x - player.x) + (z - player.z) * (z - player.z));
+  var out = gainNode(SN.owls.volume), pan = makePanner(x, y, z, 6);
+  chain(out, filt('lowpass', clamp(5000 - d * 110, 900, 5000)), pan, A.lifeBus);
+  var f0 = mr(330, 400), notes = Math.random() < 0.6 ? [[0, 0.5], [0.8, 0.22], [1.08, 0.22], [1.45, 0.75]] : [[0, 0.65], [1.0, 0.9]];
+  for (var k = 0; k < notes.length; k++) hoot(t + notes[k][0], notes[k][1], f0 * (k === notes.length - 1 ? 0.97 : 1), out);
+}
+function tickOwls(t) {
+  if (t < A.nextOwl) return;
+  A.nextOwl = t + mr(SN.owls.minGap, SN.owls.maxGap);
+  if (t < A.hushUntil) return;
+  var a = mr(0, TAU), d = mr(SN.owls.minDist, SN.owls.maxDist);
+  playOwl(player.x + Math.cos(a) * d, player.y + mr(6, 12), player.z + Math.sin(a) * d);
+}
+
+/* ---------- FOOTSTEPS
+   One step = (1) a soft low thump: the weight of your foot, and (2) a crunch: a burst of tiny
+   noise clicks through a bandpass filter. Leaves = lots of bright clicks spread over ~160ms
+   (dry leaves crackle). Dirt path = a few duller, lower clicks. Left/right feet alternate
+   13cm apart, below your head, so HRTF puts them under you. */
+function playFootstep(weight) {
+  if (!A.on) return;
+  var ctx = A.ctx, t = ctx.currentTime + 0.01;
+  A.footSide = -A.footSide;
+  var fx = player.x - player.dz * 0.13 * A.footSide, fz = player.z + player.dx * 0.13 * A.footSide;
+  var pa = pathAt(fx, fz), dirt = pa.mask * pa.vis > 0.35;
+  var pan = makePanner(fx, player.y + 0.05, fz, 1.2); pan.connect(A.stepBus);
+  var w = weight * mr(0.8, 1.1);
+  // 1) thump
+  var th = noiseSrc(A.brown, t, 0.25), thg = gainNode(0);
+  thg.gain.setValueAtTime(0, t); thg.gain.linearRampToValueAtTime(0.9 * w, t + 0.008); thg.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+  chain(th, filt('lowpass', dirt ? 260 : 200), thg, pan);
+  // 2) crunch
+  var bp = filt('bandpass', dirt ? mr(700, 1300) : mr(2000, 3800), dirt ? 0.9 : 0.7); bp.connect(pan);
+  var n = Math.round((dirt ? mr(3, 6) : mr(8, 15)) * (0.5 + 0.5 * weight));
+  for (var k = 0; k < n; k++) {
+    var tt = t + 0.006 + Math.pow(Math.random(), 1.6) * (dirt ? 0.09 : 0.16);
+    var s = noiseSrc(A.white, tt, 0.03), g = gainNode(0), amp = mr(0.15, 1) * w * (dirt ? 0.9 : 1.3);
+    g.gain.setValueAtTime(amp, tt); g.gain.exponentialRampToValueAtTime(0.001, tt + mr(0.006, 0.022));
+    chain(s, g, bp);
+  }
+  // 3) twig? (only on real steps, not the stopping scuff)
+  if (weight > 0.6 && (nearStick(fx, fz) || Math.random() < SN.steps.hiddenTwigChance * (dirt ? 0.3 : 1)))
+    playTwig(fx, player.y + 0.03, fz, SN.steps.twigVolume);
+}
+function nearStick(x, z) {
+  var S = SETS.stick, r2 = SN.steps.twigRadius * SN.steps.twigRadius;
+  for (var i = 0; i < S.n; i++) { var dx = wrapD(S.ax[i] - x), dz = wrapD(S.az[i] - z); if (dx * dx + dz * dz < r2) return true; }
+  return false;
+}
+
+/* ---------- TWIG SNAP (stage 3 reuses this for snaps BEHIND you...)
+   A snap = an ultra-short high click + a ringing "tok" (bandpass with high Q = it resonates
+   like a stick of wood) + a little low body. Sometimes it breaks twice. */
+function playTwig(x, y, z, vol, bus) {
+  if (!A.on) return;
+  var t = A.ctx.currentTime + 0.01, pan = makePanner(x, y, z, 1.5); pan.connect(bus || A.sfxBus);
+  var cracks = 1 + (Math.random() < 0.45 ? 1 : 0) + (Math.random() < 0.15 ? 1 : 0), tt = t;
+  for (var c = 0; c < cracks; c++) {
+    var amp = vol * mr(0.6, 1) * (c ? 0.6 : 1);
+    var g1 = gainNode(0); g1.gain.setValueAtTime(amp, tt); g1.gain.exponentialRampToValueAtTime(0.001, tt + 0.012);
+    chain(noiseSrc(A.white, tt, 0.05), filt('highpass', 1500), g1, pan);
+    var g2 = gainNode(0); g2.gain.setValueAtTime(amp * 3, tt); g2.gain.exponentialRampToValueAtTime(0.001, tt + 0.05);
+    chain(noiseSrc(A.white, tt, 0.08), filt('bandpass', mr(1400, 2800), 6), g2, pan);
+    var g3 = gainNode(0); g3.gain.setValueAtTime(amp * 0.6, tt); g3.gain.exponentialRampToValueAtTime(0.001, tt + 0.07);
+    chain(noiseSrc(A.brown, tt, 0.1), filt('lowpass', 500), g3, pan);
+    tt += mr(0.03, 0.09);
+  }
+}
+
+/* ---------- THE SILENCE
+   hush(seconds): every cricket and owl stops at once, then they creep back one by one.
+   The wind drops too, but never fully: total silence sounds broken, near-silence sounds WRONG.
+   The stage-4 scare director will call this right before something happens. Press H to try it. */
+function hush(seconds) {
+  if (!A.on) return;
+  var t = A.ctx.currentTime, g = A.lifeBus.gain, H = SN.hush;
+  A.hushUntil = t + seconds;
+  g.cancelScheduledValues(t); g.setValueAtTime(g.value, t); g.linearRampToValueAtTime(0, t + H.fadeOut);
+  g.setValueAtTime(0, t + seconds); g.linearRampToValueAtTime(1, t + seconds + H.fadeIn);
+  for (var i = 0; i < A.crickets.length; i++) A.crickets[i].next = A.hushUntil + mr(0.3, H.fadeIn);   // come back one at a time
+}
+function isHushed() { return A.on && A.ctx.currentTime < A.hushUntil; }
+
+// ---------- per frame: ears follow your head; everything else updates 10x a second
+function updateAudio(dt, vr) {
+  updateListener();
+  if (player.speed > 0.3) A.droneTime += dt; else A.droneTime = Math.max(0, A.droneTime - dt * SN.drone.recover);
+  A.tick -= dt; if (A.tick > 0) return; A.tick = 0.1;
+  var t = A.ctx.currentTime;
+  A.windScale += ((isHushed() ? 0.5 : 1) - A.windScale) * 0.15;
+  tickWind(t); tickDrone(t); tickCrickets(t); tickOwls(t);
+}
+
+/* ============================================================
    LOOP
    ============================================================ */
 var lastT = 0, frames = 0, fpsT = 0, calls = 0, tris = 0, lastFps = 0, fpsDirty = false;
@@ -975,6 +1277,7 @@ function loop(time) {
   U.uTime.value = t;
   updateWalk(dt, t, vr);
   updateFlashlight(t, dt);
+  if (A.on) updateAudio(dt, vr);
   worldUpdate();
   sky.position.copy(dolly.position);
   hud.visible = vr && (showFps || t - styleFlashT < 2.5);   // style name pops up for a moment after switching
@@ -992,7 +1295,8 @@ function loop(time) {
 }
 
 // expose a few things for testing in the console (and for later stages)
-window.TREELINE = { CONFIG: CONFIG, player: player, flicker: flicker, scene: scene, sets: sets, applyStyle: applyStyle };
+window.TREELINE = { CONFIG: CONFIG, player: player, flicker: flicker, scene: scene, sets: sets, applyStyle: applyStyle,
+  audio: A, hush: hush, playTwig: playTwig, playOwl: playOwl, playFootstep: playFootstep };
 
 applyStyle(CONFIG.style);
 worldUpdate();
