@@ -105,7 +105,8 @@ var CONFIG = {
     range: 22,           // light fades linearly to nothing at this distance
     angle: 0.36,         // half-angle of the cone in radians (~20 degrees, narrow)
     penumbra: 0.55,      // soft edge of the cone, 0 = razor edge
-    offset: [0.12, -0.28, 0], // held a bit right and below your eyes
+    inHand: true,        // VR: the torch is in your controller hand. false = strapped to your head.
+    offset: [0.12, -0.28, 0], // desktop (or no controller): held a bit right and below your eyes
     flickerMinGap: 25,   // seconds between random flickers
     flickerMaxGap: 75,
     flickerDepth: 0.55   // how dark a random flicker can dip (0..1). The scare director can go harder later.
@@ -382,6 +383,29 @@ var flash = new T.SpotLight('#ffffff', 1.8, FL.range, FL.angle, FL.penumbra, 1);
 flash.position.set(FL.offset[0], FL.offset[1], FL.offset[2]);
 flash.target.position.set(0, -0.8, -6);   // aims where you look, tipped down a touch
 cam.add(flash); cam.add(flash.target);
+
+// ---------- the torch in your hand (VR)
+// renderer.xr.getController(0) is a Group that three.js moves to match your controller every
+// frame. The Go only tracks rotation, so the browser fakes a hand position with an "arm model".
+// Anything we parent to it (the light, a little torch mesh) gets carried around by your hand.
+var controller = renderer.xr.getController(0);
+dolly.add(controller);                      // same parent as the camera, so walking moves it too
+var torchModel = new T.Group();
+var torchBody = new T.Mesh(new T.CylinderGeometry(0.019, 0.022, 0.17, 10).rotateX(Math.PI / 2)); torchBody.position.z = 0.02;
+var torchHead = new T.Mesh(new T.CylinderGeometry(0.027, 0.02, 0.04, 10).rotateX(Math.PI / 2)); torchHead.position.z = -0.075;
+var torchLensMat = new T.MeshBasicMaterial({ color: '#fff4d6', fog: false }), torchLensCol = new T.Color('#fff4d6');
+var torchLens = new T.Mesh(new T.CircleGeometry(0.023, 10), torchLensMat); torchLens.position.z = -0.0955; torchLens.rotation.y = Math.PI;
+torchModel.add(torchBody); torchModel.add(torchHead); torchModel.add(torchLens);
+torchModel.visible = false; controller.add(torchModel);
+function holdFlash(inHand) {
+  var parent = inHand ? controller : cam;
+  parent.add(flash); parent.add(flash.target);  // add() moves it from its old parent automatically
+  if (inHand) { flash.position.set(0, 0, -0.1); flash.target.position.set(0, 0, -6); }   // points where the controller points
+  else { flash.position.set(FL.offset[0], FL.offset[1], FL.offset[2]); flash.target.position.set(0, -0.8, -6); }
+  torchModel.visible = inHand;
+}
+controller.addEventListener('connected', function () { if (FL.inHand) holdFlash(true); });
+controller.addEventListener('disconnected', function () { holdFlash(false); });
 
 // ---------- sky dome (STYLE LAB shader, night colours: faint glow straight up, black everywhere else)
 // One tweak: the gradient curve (uCurve) is per style. In 1-bit the sky has no contrast curve (the mesh
@@ -851,6 +875,7 @@ function updateFlashlight(now, dt) {
     flick.next = now + mr(FL.flickerMinGap, FL.flickerMaxGap);
   }
   flash.intensity = flashBase * level;
+  torchLensMat.color.copy(torchLensCol).multiplyScalar(0.15 + 0.85 * level);   // the lens flickers with the beam
 }
 
 /* ============================================================
@@ -901,7 +926,11 @@ function applyStyle(key) {
   if (!CONFIG.styles[key]) key = 'ps1';
   styleKey = key; style = CONFIG.styles[key];
   var st = style, k;
-  if (!st.mats) { st.mats = {}; for (k in SETS) if (k !== 'blob') st.mats[k] = makeMat(st, k); st.mats.ground = makeMat(st, 'ground'); }
+  if (!st.mats) {
+    st.mats = {}; for (k in SETS) if (k !== 'blob') st.mats[k] = makeMat(st, k); st.mats.ground = makeMat(st, 'ground');
+    st.mats.torch = patch(new T.MeshLambertMaterial({ color: '#2b2b2e' }), { snap: !!st.patch.snap, dither: st.patch.dither || 0, radialFog: true });
+  }
+  torchBody.material = torchHead.material = st.mats.torch;
   for (k in SETS) {
     var S = SETS[k];
     if (k !== 'blob') S.mesh.material = st.mats[k];
@@ -991,7 +1020,7 @@ vrBtn.onclick = function () {
     s.addEventListener('selectstart', function () { selectHeld = true; });
     s.addEventListener('selectend', function () { selectHeld = false; });
     s.addEventListener('end', function () {
-      session = null; selectHeld = false; vrBtn.textContent = 'ENTER VR';
+      session = null; selectHeld = false; vrBtn.textContent = 'ENTER VR'; holdFlash(false);
       dolly.rotation.set(0, 0, 0); started = false; startEl.style.display = ''; resize();
     });
     vrBtn.textContent = 'EXIT VR';
